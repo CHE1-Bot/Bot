@@ -57,12 +57,6 @@ func (m *Module) action(kind string) func(*discordgo.Session, *discordgo.Interac
 		if err != nil {
 			log.Printf("mod log: %v", err)
 		}
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: kind + " applied to <@" + target.ID + ">",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
+		handler.Reply(s, i, kind+" applied to <@"+target.ID+">")
 	}
 }

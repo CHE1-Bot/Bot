@@ -10,7 +10,9 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/che1/bot/config"
+	"github.com/che1/bot/internal/actions"
 	"github.com/che1/bot/internal/applications"
+	"github.com/che1/bot/internal/dashboard"
 	"github.com/che1/bot/internal/db"
 	"github.com/che1/bot/internal/giveaways"
 	"github.com/che1/bot/internal/handler"
@@ -29,14 +31,33 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	database, err := db.New(ctx, cfg.PostgresURL)
-	if err != nil {
-		log.Fatalf("db: %v", err)
+	var database *db.DB
+	if cfg.PostgresURL != "" {
+		database, err = db.New(ctx, cfg.PostgresURL)
+		if err != nil {
+			log.Fatalf("db: %v", err)
+		}
+		defer database.Close()
+	} else {
+		log.Println("POSTGRES_URL not set — running without database; DB-backed modules disabled")
 	}
-	defer database.Close()
 
-	jobs := worker.NewQueue(cfg.RedisAddr, cfg.RedisPass)
-	defer jobs.Close()
+	var jobs *worker.Queue
+	if cfg.WorkerURL != "" {
+		jobs = worker.NewQueue(cfg.WorkerURL, cfg.WorkerAPIKey)
+		defer jobs.Close()
+		log.Printf("worker linked: %s", cfg.WorkerURL)
+	} else {
+		log.Println("WORKER_URL not set — Worker integration disabled")
+	}
+
+	var dash *dashboard.Client
+	if cfg.DashboardURL != "" {
+		dash = dashboard.New(cfg.DashboardURL, cfg.DashboardAPIKey)
+		log.Printf("dashboard linked: %s", cfg.DashboardURL)
+	} else {
+		log.Println("DASHBOARD_URL not set — Dashboard integration disabled")
+	}
 
 	session, err := discordgo.New("Bot " + cfg.DiscordToken)
 	if err != nil {
@@ -49,11 +70,13 @@ func main() {
 		discordgo.IntentsMessageContent
 
 	router := handler.New()
-	router.Register(&tickets.Module{DB: database, Worker: jobs})
-	router.Register(leveling.New(database, jobs))
-	router.Register(&moderation.Module{DB: database})
-	router.Register(&applications.Module{DB: database})
-	router.Register(&giveaways.Module{DB: database, Worker: jobs})
+	if database != nil {
+		router.Register(&tickets.Module{DB: database, Worker: jobs})
+		router.Register(leveling.New(database, jobs))
+		router.Register(&moderation.Module{DB: database})
+		router.Register(&applications.Module{DB: database, Dashboard: dash})
+		router.Register(&giveaways.Module{DB: database, Worker: jobs})
+	}
 
 	if err := session.Open(); err != nil {
 		log.Fatalf("open: %v", err)
@@ -62,6 +85,20 @@ func main() {
 
 	if err := router.Attach(session, cfg.GuildID); err != nil {
 		log.Fatalf("attach: %v", err)
+	}
+
+	// Subscribe to dashboard-driven actions emitted by the Worker hub.
+	if jobs != nil {
+		wsURL := cfg.WorkerWSURL
+		if wsURL == "" {
+			wsURL = worker.DeriveWSURL(cfg.WorkerURL)
+		}
+		if wsURL != "" {
+			sub := worker.NewSubscriber(wsURL, jobs)
+			(&actions.Handlers{Session: session}).Register(sub)
+			go sub.Run(ctx)
+			log.Printf("subscribed to worker events: %s", wsURL)
+		}
 	}
 
 	log.Printf("CHE1 bot online as %s", session.State.User.Username)

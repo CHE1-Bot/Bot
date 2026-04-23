@@ -58,8 +58,5 @@ func (m *Module) handleStart(s *discordgo.Session, i *discordgo.InteractionCreat
 		"ends_at":     ends,
 	})
 
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Content: "Giveaway started.", Flags: discordgo.MessageFlagsEphemeral},
-	})
+	handler.Reply(s, i, "Giveaway started.")
 }
