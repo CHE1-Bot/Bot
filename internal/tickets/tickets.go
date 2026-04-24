@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -74,7 +74,7 @@ func (m *Module) handleOpen(s *discordgo.Session, i *discordgo.InteractionCreate
 		i.GuildID, ch.ID, userID, subject,
 	).Scan(&ticketID)
 	if err != nil {
-		log.Printf("ticket insert failed: %v", err)
+		slog.Error("ticket insert failed", "err", err)
 	}
 
 	respond(s, i, fmt.Sprintf("Ticket opened in <#%s> (id=%d)", ch.ID, ticketID))
@@ -103,7 +103,7 @@ func (m *Module) handleClose(s *discordgo.Session, i *discordgo.InteractionCreat
 
 	msgs, err := s.ChannelMessages(i.ChannelID, 100, "", "", "")
 	if err != nil {
-		log.Printf("fetch messages: %v", err)
+		slog.Error("fetch messages", "err", err)
 	}
 
 	// Offload transcript rendering (HTML/PDF) to the Worker.

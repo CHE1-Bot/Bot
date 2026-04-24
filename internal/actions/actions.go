@@ -11,7 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -42,7 +42,7 @@ func (h *Handlers) Register(sub *worker.Subscriber) {
 		// The Worker emits task.completed for settings PATCH/POST flows that
 		// the Dashboard runs. There's no in-process cache to invalidate yet,
 		// but logging makes the propagation visible.
-		log.Printf("dashboard event %s subject=%s", e.Type, e.Subject)
+		slog.Info("dashboard event", "type", e.Type, "subject", e.Subject)
 	})
 }
 
@@ -165,7 +165,7 @@ func (h *Handlers) sendGiveawayPanel(_ context.Context, t worker.Task) (map[stri
 		return nil, err
 	}
 	if err := h.Session.MessageReactionAdd(msg.ChannelID, msg.ID, "🎉"); err != nil {
-		log.Printf("giveaway reaction: %v", err)
+		slog.Warn("giveaway reaction failed", "err", err)
 	}
 	return map[string]any{"message_id": msg.ID}, nil
 }

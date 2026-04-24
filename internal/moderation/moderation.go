@@ -2,7 +2,7 @@ package moderation
 
 import (
 	"context"
-	"log"
+	"log/slog"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -55,7 +55,7 @@ func (m *Module) action(kind string) func(*discordgo.Session, *discordgo.Interac
 			VALUES ($1,$2,$3,$4,$5,NOW())`,
 			i.GuildID, i.Member.User.ID, target.ID, kind, reason)
 		if err != nil {
-			log.Printf("mod log: %v", err)
+			slog.Error("mod log", "err", err)
 		}
 		handler.Reply(s, i, kind+" applied to <@"+target.ID+">")
 	}

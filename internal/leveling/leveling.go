@@ -2,7 +2,7 @@ package leveling
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"math"
 	"sync"
 	"time"
@@ -67,7 +67,7 @@ func (m *Module) MessageCreate(s *discordgo.Session, msg *discordgo.MessageCreat
 		msg.GuildID, msg.Author.ID, xpPerMessage,
 	).Scan(&xp, &level)
 	if err != nil {
-		log.Printf("xp upsert: %v", err)
+		slog.Error("xp upsert", "err", err)
 		return
 	}
 
@@ -77,7 +77,7 @@ func (m *Module) MessageCreate(s *discordgo.Session, msg *discordgo.MessageCreat
 			`UPDATE user_levels SET level=$1 WHERE guild_id=$2 AND user_id=$3`,
 			newLevel, msg.GuildID, msg.Author.ID)
 		if err != nil {
-			log.Printf("level bump: %v", err)
+			slog.Error("level bump", "err", err)
 			return
 		}
 		_, _ = s.ChannelMessageSend(msg.ChannelID,

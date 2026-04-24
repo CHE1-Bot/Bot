@@ -1,7 +1,9 @@
 package handler
 
 import (
-	"log"
+	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
@@ -66,7 +68,11 @@ func (r *Router) Attach(s *discordgo.Session, guildID string) error {
 			return
 		}
 		for _, mod := range r.modules {
-			mod.MessageCreate(s, m)
+			mod := mod
+			func() {
+				defer recoverInteraction("message handler", "module", mod.Name())
+				mod.MessageCreate(s, m)
+			}()
 		}
 	})
 
@@ -76,13 +82,14 @@ func (r *Router) Attach(s *discordgo.Session, guildID string) error {
 	}
 	_, err := s.ApplicationCommandBulkOverwrite(s.State.User.ID, guildID, defs)
 	if err != nil {
-		log.Printf("command registration failed: %v", err)
+		slog.Error("command registration failed", "err", err)
 	}
 	return err
 }
 
 func (r *Router) handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	cmd, ok := r.commands[i.ApplicationCommandData().Name]
+	name := i.ApplicationCommandData().Name
+	cmd, ok := r.commands[name]
 	if !ok {
 		return
 	}
@@ -93,9 +100,10 @@ func (r *Router) handleCommand(s *discordgo.Session, i *discordgo.InteractionCre
 			Flags:   discordgo.MessageFlagsEphemeral,
 		},
 	}); err != nil {
-		log.Printf("thinking ack failed: %v", err)
+		slog.Error("thinking ack failed", "command", name, "err", err)
 		return
 	}
+	defer recoverInteractionReply(s, i, "command", "name", name)
 	cmd.Handler(s, i)
 }
 
@@ -116,9 +124,10 @@ func (r *Router) handleComponent(s *discordgo.Session, i *discordgo.InteractionC
 			Flags:   discordgo.MessageFlagsEphemeral,
 		},
 	}); err != nil {
-		log.Printf("thinking ack failed: %v", err)
+		slog.Error("thinking ack failed", "component", id, "err", err)
 		return
 	}
+	defer recoverInteractionReply(s, i, "component", "custom_id", id)
 	h(s, i)
 }
 
@@ -129,6 +138,23 @@ func Reply(s *discordgo.Session, i *discordgo.InteractionCreate, content string)
 		Content: &content,
 	})
 	if err != nil {
-		log.Printf("reply edit failed: %v", err)
+		slog.Error("reply edit failed", "err", err)
+	}
+}
+
+func recoverInteraction(where string, attrs ...any) {
+	if r := recover(); r != nil {
+		args := append([]any{"where", where, "panic", fmt.Sprint(r), "stack", string(debug.Stack())}, attrs...)
+		slog.Error("recovered from panic", args...)
+	}
+}
+
+// recoverInteractionReply also lets the user know something went wrong
+// instead of leaving them staring at "CHE1 is thinking..." forever.
+func recoverInteractionReply(s *discordgo.Session, i *discordgo.InteractionCreate, where string, attrs ...any) {
+	if r := recover(); r != nil {
+		args := append([]any{"where", where, "panic", fmt.Sprint(r), "stack", string(debug.Stack())}, attrs...)
+		slog.Error("recovered from panic", args...)
+		Reply(s, i, "Something went wrong. The team has been notified.")
 	}
 }

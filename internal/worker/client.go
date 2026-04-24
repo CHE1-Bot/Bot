@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -26,32 +28,30 @@ type Queue struct {
 	baseURL string
 	apiKey  string
 	hc      *http.Client
+
+	maxRetries int
+	retryBase  time.Duration
 }
 
-type taskRequest struct {
+type createTaskRequest struct {
 	Kind      string `json:"kind"`
 	Input     any    `json:"input"`
 	CreatedBy string `json:"created_by"`
 }
 
-type taskResponse struct {
-	ID     string          `json:"id"`
-	Status string          `json:"status"`
-	Output json.RawMessage `json:"output"`
-	Error  string          `json:"error,omitempty"`
-}
-
 func NewQueue(baseURL, apiKey string) *Queue {
 	return &Queue{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
-		hc:      &http.Client{Timeout: 15 * time.Second},
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		apiKey:     apiKey,
+		hc:         &http.Client{Timeout: 15 * time.Second},
+		maxRetries: 3,
+		retryBase:  200 * time.Millisecond,
 	}
 }
 
 // Enqueue submits a task to the Worker and returns the assigned task ID.
 func (q *Queue) Enqueue(ctx context.Context, jobType string, payload any) (string, error) {
-	body, err := json.Marshal(taskRequest{
+	body, err := json.Marshal(createTaskRequest{
 		Kind:      jobType,
 		Input:     payload,
 		CreatedBy: "bot",
@@ -59,32 +59,16 @@ func (q *Queue) Enqueue(ctx context.Context, jobType string, payload any) (strin
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, q.baseURL+"/api/v1/tasks", bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+q.apiKey)
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := q.hc.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("worker /api/v1/tasks: %s: %s", resp.Status, string(b))
-	}
-
-	var out taskResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	var out Task
+	if err := q.doJSON(ctx, http.MethodPost, "/api/v1/tasks", body, &out); err != nil {
 		return "", err
 	}
 	return out.ID, nil
 }
 
 // WaitResult polls GET /api/v1/tasks/{id} until the task finishes or timeout.
+// Returns the task's result map encoded as JSON.
 func (q *Queue) WaitResult(ctx context.Context, taskID string, timeout time.Duration) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -93,28 +77,16 @@ func (q *Queue) WaitResult(ctx context.Context, taskID string, timeout time.Dura
 	defer tick.Stop()
 
 	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, q.baseURL+"/api/v1/tasks/"+taskID, nil)
-		if err != nil {
+		var t Task
+		if err := q.doJSON(ctx, http.MethodGet, "/api/v1/tasks/"+taskID, nil, &t); err != nil {
 			return nil, err
 		}
-		req.Header.Set("Authorization", "Bearer "+q.apiKey)
 
-		resp, err := q.hc.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		var out taskResponse
-		decErr := json.NewDecoder(resp.Body).Decode(&out)
-		resp.Body.Close()
-		if decErr != nil {
-			return nil, decErr
-		}
-
-		switch out.Status {
-		case "done", "completed", "success":
-			return out.Output, nil
+		switch t.Status {
+		case "succeeded", "done", "completed", "success":
+			return json.Marshal(t.Result)
 		case "failed", "error":
-			return nil, fmt.Errorf("task %s failed: %s", taskID, out.Error)
+			return nil, fmt.Errorf("task %s failed: %s", taskID, t.Error)
 		}
 
 		select {
@@ -125,30 +97,85 @@ func (q *Queue) WaitResult(ctx context.Context, taskID string, timeout time.Dura
 	}
 }
 
-// Complete marks a task done from the bot side (rarely used; the Worker
-// usually owns task state). Mirrors POST /api/v1/tasks/{id}/complete.
+// Complete reports the task's outcome back to the Worker. The Worker then
+// emits task.completed, which is how the Dashboard observes bot-driven
+// actions finishing.
 func (q *Queue) Complete(ctx context.Context, taskID string, output any, errMsg string) error {
-	body, err := json.Marshal(map[string]any{"output": output, "error": errMsg})
+	body, err := json.Marshal(map[string]any{"result": output, "error": errMsg})
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, q.baseURL+"/api/v1/tasks/"+taskID+"/complete", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+q.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := q.hc.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("worker complete: %s: %s", resp.Status, string(b))
-	}
-	return nil
+	return q.doJSON(ctx, http.MethodPost, "/api/v1/tasks/"+taskID+"/complete", body, nil)
 }
 
 func (q *Queue) Close() error { return nil }
+
+// doJSON performs one REST call with retries on network errors and 5xx.
+// 4xx responses are returned immediately (client error, no retry).
+func (q *Queue) doJSON(ctx context.Context, method, path string, body []byte, out any) error {
+	url := q.baseURL + path
+
+	var lastErr error
+	for attempt := 0; attempt <= q.maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := q.retryBase * (1 << (attempt - 1))
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		var reader io.Reader
+		if body != nil {
+			reader = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, url, reader)
+		if err != nil {
+			return err
+		}
+		if q.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+q.apiKey)
+		}
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		resp, err := q.hc.Do(req)
+		if err != nil {
+			lastErr = err
+			slog.Warn("worker request failed, retrying", "method", method, "path", path, "attempt", attempt+1, "err", err)
+			continue
+		}
+
+		if resp.StatusCode >= 500 {
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("worker %s %s: %s: %s", method, path, resp.Status, string(b))
+			slog.Warn("worker 5xx, retrying", "method", method, "path", path, "status", resp.Status, "attempt", attempt+1)
+			continue
+		}
+
+		if resp.StatusCode >= 400 {
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("worker %s %s: %s: %s", method, path, resp.Status, string(b))
+		}
+
+		if out != nil {
+			err = json.NewDecoder(resp.Body).Decode(out)
+			resp.Body.Close()
+			if err != nil {
+				return fmt.Errorf("decode %s %s: %w", method, path, err)
+			}
+		} else {
+			resp.Body.Close()
+		}
+		return nil
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("worker request failed")
+	}
+	return fmt.Errorf("worker %s %s after %d attempts: %w", method, path, q.maxRetries+1, lastErr)
+}
