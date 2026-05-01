@@ -26,6 +26,12 @@ import (
 	"github.com/che1/bot/internal/worker"
 )
 
+// buildVersion is stamped at build time via
+// `-ldflags "-X main.buildVersion=$(git rev-parse --short HEAD)"` and
+// surfaced via /api/meta and the startup banner. Mirrors the Worker's
+// and Dashboard's convention.
+var buildVersion = "dev"
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -37,7 +43,8 @@ func main() {
 	setupLogger(cfg)
 
 	slog.Info("starting CHE1 bot",
-		"env", cfg.Env,
+		"version", buildVersion,
+		"app_env", cfg.Env,
 		"guild_id", cfg.GuildID,
 		"discord_token", cfg.RedactedToken(),
 		"worker_url", cfg.WorkerURL,
@@ -52,7 +59,13 @@ func main() {
 	var wg sync.WaitGroup
 
 	// Health server comes up first so probes can observe "starting" state.
-	health := &httpsrv.Health{}
+	health := httpsrv.NewHealth(httpsrv.Meta{
+		AppEnv:              string(cfg.Env),
+		Version:             buildVersion,
+		WorkerConfigured:    cfg.WorkerURL != "",
+		DashboardConfigured: cfg.DashboardURL != "",
+		DBEnabled:           cfg.PostgresURL != "",
+	})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

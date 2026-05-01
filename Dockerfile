@@ -12,10 +12,12 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 COPY . .
 
 # Static, stripped binary. CGO off so the scratch/distroless runtime works.
+# BUILD_VERSION mirrors the Worker repo's convention; surfaced via /api/meta.
+ARG BUILD_VERSION=docker
 ENV CGO_ENABLED=0 GOOS=linux GOFLAGS=-trimpath
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    go build -ldflags="-s -w" -o /out/che1-bot .
+    go build -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION}" -o /out/che1-bot .
 
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app

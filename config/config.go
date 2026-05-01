@@ -43,7 +43,7 @@ type Config struct {
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
-	env := Environment(strings.ToLower(os.Getenv("ENV")))
+	env := Environment(strings.ToLower(firstNonEmpty(os.Getenv("APP_ENV"), os.Getenv("ENV"))))
 	switch env {
 	case "", EnvDevelopment, "dev":
 		env = EnvDevelopment
@@ -52,7 +52,7 @@ func Load() (*Config, error) {
 	case EnvProduction, "prod":
 		env = EnvProduction
 	default:
-		return nil, fmt.Errorf("ENV must be development|staging|production, got %q", env)
+		return nil, fmt.Errorf("APP_ENV must be development|staging|production, got %q", env)
 	}
 
 	c := &Config{

@@ -1,16 +1,18 @@
 // Package actions handles dashboard-driven Discord side-effects.
 //
-// The Dashboard creates tasks via Worker REST (POST /api/v1/tasks); the
-// Worker emits task.created events on its WebSocket hub; the bot
-// subscribes and runs the side-effect (post a message, render a panel, ...).
-// The bot reports completion back via Worker.Complete, which the Dashboard
-// observes through task.completed.
+// Flow: Dashboard creates a task via Worker REST (POST /api/v1/tasks);
+// the Worker emits task.created on its WebSocket hub; the bot subscribes
+// and runs the side-effect (post a message, render a panel, kick a user,
+// DM an applicant, draw a giveaway winner, ...). The bot reports
+// completion via Worker.Complete, which the Dashboard observes through
+// task.completed.
+//
+// The kind catalog mirrors CHE1-Bot/Worker README's task-kind table.
 package actions
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 
 	"github.com/bwmarrin/discordgo"
@@ -18,12 +20,37 @@ import (
 	"github.com/che1/bot/internal/worker"
 )
 
-// Task kinds the bot performs on the Dashboard's behalf.
+// Task kinds the bot performs on the Dashboard's behalf. Strings are
+// canonical names from the Worker repo's catalog. Some Dashboard code
+// still uses singular `giveaway.*` aliases — registered alongside the
+// canonical plural form in Register so we're robust to both.
 const (
 	KindSendMessage          = "send_message"
 	KindSendApplicationPanel = "send_application_panel"
 	KindSendTicketPanel      = "send_ticket_panel"
 	KindSendGiveawayPanel    = "send_giveaway_panel"
+
+	KindTicketsCreate  = "tickets.create"
+	KindTicketsUpdate  = "tickets.update"
+	KindTicketsClaim   = "tickets.claim"
+	KindTicketsUnclaim = "tickets.unclaim"
+
+	KindModerationAction = "moderation.action"
+	KindModerationKick   = "moderation.kick"
+	KindModerationBan    = "moderation.ban"
+	KindModerationUnban  = "moderation.unban"
+	KindModerationMute   = "moderation.mute"
+	KindModerationUnmute = "moderation.unmute"
+	KindModerationWarn   = "moderation.warn"
+
+	KindApplicationsAccepted = "applications.accepted"
+	KindApplicationsRejected = "applications.rejected"
+
+	KindGiveawaysEnd    = "giveaways.end"
+	KindGiveawaysReroll = "giveaways.reroll"
+	// Singular aliases used by some Dashboard code paths.
+	KindGiveawayEnd    = "giveaway.end"
+	KindGiveawayReroll = "giveaway.reroll"
 )
 
 type Handlers struct {
@@ -31,143 +58,43 @@ type Handlers struct {
 }
 
 // Register wires every supported task kind into the Subscriber, and logs
-// settings updates so operators can see config changes propagating.
+// task.completed so operators can see settings PATCH/POST flows propagating.
 func (h *Handlers) Register(sub *worker.Subscriber) {
+	// Panels & raw messages.
 	sub.OnTask(KindSendMessage, h.sendMessage)
 	sub.OnTask(KindSendApplicationPanel, h.sendApplicationPanel)
 	sub.OnTask(KindSendTicketPanel, h.sendTicketPanel)
 	sub.OnTask(KindSendGiveawayPanel, h.sendGiveawayPanel)
 
+	// Tickets.
+	sub.OnTask(KindTicketsCreate, h.ticketsCreate)
+	sub.OnTask(KindTicketsUpdate, h.ticketsUpdate)
+	sub.OnTask(KindTicketsClaim, h.ticketsClaim)
+	sub.OnTask(KindTicketsUnclaim, h.ticketsUnclaim)
+
+	// Moderation. Both the unified `moderation.action` and split kinds
+	// are wired so the bot works regardless of how the Dashboard dispatches.
+	sub.OnTask(KindModerationAction, h.moderationAction)
+	sub.OnTask(KindModerationKick, h.moderationKick)
+	sub.OnTask(KindModerationBan, h.moderationBan)
+	sub.OnTask(KindModerationUnban, h.moderationUnban)
+	sub.OnTask(KindModerationMute, h.moderationMute)
+	sub.OnTask(KindModerationUnmute, h.moderationUnmute)
+	sub.OnTask(KindModerationWarn, h.moderationWarn)
+
+	// Applications.
+	sub.OnTask(KindApplicationsAccepted, h.applicationsAccepted)
+	sub.OnTask(KindApplicationsRejected, h.applicationsRejected)
+
+	// Giveaways. Plural is canonical; singular aliases share handlers.
+	sub.OnTask(KindGiveawaysEnd, h.giveawaysEnd)
+	sub.OnTask(KindGiveawayEnd, h.giveawaysEnd)
+	sub.OnTask(KindGiveawaysReroll, h.giveawaysReroll)
+	sub.OnTask(KindGiveawayReroll, h.giveawaysReroll)
+
 	sub.OnEvent(worker.EventTaskCompleted, func(_ context.Context, e worker.Event) {
-		// The Worker emits task.completed for settings PATCH/POST flows that
-		// the Dashboard runs. There's no in-process cache to invalidate yet,
-		// but logging makes the propagation visible.
-		slog.Info("dashboard event", "type", e.Type, "subject", e.Subject)
+		slog.Debug("dashboard event", "type", e.Type, "subject", e.Subject)
 	})
-}
-
-func (h *Handlers) sendMessage(_ context.Context, t worker.Task) (map[string]any, error) {
-	var p struct {
-		ChannelID string `json:"channel_id"`
-		Content   string `json:"content"`
-	}
-	if err := decode(t.Input, &p); err != nil {
-		return nil, err
-	}
-	if p.ChannelID == "" || p.Content == "" {
-		return nil, fmt.Errorf("send_message: channel_id and content required")
-	}
-	msg, err := h.Session.ChannelMessageSend(p.ChannelID, p.Content)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"message_id": msg.ID, "channel_id": msg.ChannelID}, nil
-}
-
-func (h *Handlers) sendApplicationPanel(_ context.Context, t worker.Task) (map[string]any, error) {
-	var p struct {
-		ChannelID   string `json:"channel_id"`
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		Role        string `json:"role"`
-		ButtonLabel string `json:"button_label"`
-	}
-	if err := decode(t.Input, &p); err != nil {
-		return nil, err
-	}
-	if p.ButtonLabel == "" {
-		p.ButtonLabel = "Apply"
-	}
-	msg, err := h.Session.ChannelMessageSendComplex(p.ChannelID, &discordgo.MessageSend{
-		Embeds: []*discordgo.MessageEmbed{{
-			Title:       p.Title,
-			Description: p.Description,
-			Color:       0x5865F2,
-		}},
-		Components: []discordgo.MessageComponent{
-			discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-				discordgo.Button{
-					Label:    p.ButtonLabel,
-					Style:    discordgo.PrimaryButton,
-					CustomID: "apply:" + p.Role,
-				},
-			}},
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"message_id": msg.ID}, nil
-}
-
-func (h *Handlers) sendTicketPanel(_ context.Context, t worker.Task) (map[string]any, error) {
-	var p struct {
-		ChannelID   string `json:"channel_id"`
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		ButtonLabel string `json:"button_label"`
-		PanelID     string `json:"panel_id"`
-	}
-	if err := decode(t.Input, &p); err != nil {
-		return nil, err
-	}
-	if p.ButtonLabel == "" {
-		p.ButtonLabel = "Open ticket"
-	}
-	customID := "ticket:open"
-	if p.PanelID != "" {
-		customID = "ticket:open:" + p.PanelID
-	}
-	msg, err := h.Session.ChannelMessageSendComplex(p.ChannelID, &discordgo.MessageSend{
-		Embeds: []*discordgo.MessageEmbed{{
-			Title:       p.Title,
-			Description: p.Description,
-			Color:       0x57F287,
-		}},
-		Components: []discordgo.MessageComponent{
-			discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-				discordgo.Button{
-					Label:    p.ButtonLabel,
-					Style:    discordgo.SuccessButton,
-					CustomID: customID,
-				},
-			}},
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"message_id": msg.ID}, nil
-}
-
-func (h *Handlers) sendGiveawayPanel(_ context.Context, t worker.Task) (map[string]any, error) {
-	var p struct {
-		ChannelID   string `json:"channel_id"`
-		Prize       string `json:"prize"`
-		Description string `json:"description"`
-		EndsAtUnix  int64  `json:"ends_at_unix"`
-	}
-	if err := decode(t.Input, &p); err != nil {
-		return nil, err
-	}
-	desc := p.Description
-	if p.EndsAtUnix > 0 {
-		desc = fmt.Sprintf("%s\n\nEnds <t:%d:R>", desc, p.EndsAtUnix)
-	}
-	msg, err := h.Session.ChannelMessageSendComplex(p.ChannelID, &discordgo.MessageSend{
-		Embeds: []*discordgo.MessageEmbed{{
-			Title:       "🎉 " + p.Prize,
-			Description: desc,
-			Color:       0xEB459E,
-		}},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := h.Session.MessageReactionAdd(msg.ChannelID, msg.ID, "🎉"); err != nil {
-		slog.Warn("giveaway reaction failed", "err", err)
-	}
-	return map[string]any{"message_id": msg.ID}, nil
 }
 
 func decode(in map[string]any, out any) error {
