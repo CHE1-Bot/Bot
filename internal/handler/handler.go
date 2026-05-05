@@ -15,6 +15,10 @@ const thinkingMessage = "CHE1 is thinking..."
 type SlashCommand struct {
 	Definition *discordgo.ApplicationCommand
 	Handler    func(s *discordgo.Session, i *discordgo.InteractionCreate)
+	// NoAck skips the auto "CHE1 is thinking..." response — required for
+	// commands that respond with a modal (Discord rejects a modal response
+	// after the interaction has already been acknowledged).
+	NoAck bool
 }
 
 type Module interface {
@@ -28,16 +32,22 @@ type Module interface {
 // and its CustomID has the registered prefix.
 type ComponentHandler func(s *discordgo.Session, i *discordgo.InteractionCreate)
 
+// ModalHandler runs when a modal is submitted and its CustomID has the
+// registered prefix.
+type ModalHandler func(s *discordgo.Session, i *discordgo.InteractionCreate)
+
 type Router struct {
 	modules    []Module
 	commands   map[string]SlashCommand
 	components map[string]ComponentHandler // keyed by CustomID prefix
+	modals     map[string]ModalHandler     // keyed by CustomID prefix
 }
 
 func New() *Router {
 	return &Router{
 		commands:   map[string]SlashCommand{},
 		components: map[string]ComponentHandler{},
+		modals:     map[string]ModalHandler{},
 	}
 }
 
@@ -54,6 +64,12 @@ func (r *Router) OnComponent(prefix string, h ComponentHandler) {
 	r.components[prefix] = h
 }
 
+// OnModal registers a handler for any modal-submit interaction whose
+// CustomID begins with prefix.
+func (r *Router) OnModal(prefix string, h ModalHandler) {
+	r.modals[prefix] = h
+}
+
 func (r *Router) Attach(s *discordgo.Session, guildID string) error {
 	s.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		switch i.Type {
@@ -61,6 +77,8 @@ func (r *Router) Attach(s *discordgo.Session, guildID string) error {
 			r.handleCommand(s, i)
 		case discordgo.InteractionMessageComponent:
 			r.handleComponent(s, i)
+		case discordgo.InteractionModalSubmit:
+			r.handleModal(s, i)
 		}
 	})
 	s.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -93,6 +111,34 @@ func (r *Router) handleCommand(s *discordgo.Session, i *discordgo.InteractionCre
 	if !ok {
 		return
 	}
+	if !cmd.NoAck {
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: thinkingMessage,
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		}); err != nil {
+			slog.Error("thinking ack failed", "command", name, "err", err)
+			return
+		}
+		defer recoverInteractionReply(s, i, "command", "name", name)
+	} else {
+		defer recoverInteraction("command", "name", name)
+	}
+	cmd.Handler(s, i)
+}
+
+func (r *Router) handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	id := i.ModalSubmitData().CustomID
+	prefix := id
+	if idx := strings.Index(id, ":"); idx >= 0 {
+		prefix = id[:idx]
+	}
+	h, ok := r.modals[prefix]
+	if !ok {
+		return
+	}
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
@@ -100,11 +146,11 @@ func (r *Router) handleCommand(s *discordgo.Session, i *discordgo.InteractionCre
 			Flags:   discordgo.MessageFlagsEphemeral,
 		},
 	}); err != nil {
-		slog.Error("thinking ack failed", "command", name, "err", err)
+		slog.Error("thinking ack failed", "modal", id, "err", err)
 		return
 	}
-	defer recoverInteractionReply(s, i, "command", "name", name)
-	cmd.Handler(s, i)
+	defer recoverInteractionReply(s, i, "modal", "custom_id", id)
+	h(s, i)
 }
 
 func (r *Router) handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {

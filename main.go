@@ -121,13 +121,20 @@ func main() {
 		router.Register(leveling.New(database, jobs))
 		router.Register(&moderation.Module{DB: database})
 		router.Register(&applications.Module{DB: database, Dashboard: dash})
-		router.Register(&giveaways.Module{DB: database, Worker: jobs})
+
+		giveawaysMod := &giveaways.Module{DB: database, Worker: jobs}
+		router.Register(giveawaysMod)
+		giveawaysMod.RegisterModals(router) // /gcreate modal-submit
 	}
 
 	if err := session.Open(); err != nil {
 		slog.Error("discord open failed", "err", err)
 		os.Exit(1)
 	}
+
+	// Component buttons (giveaway entry, etc.) registered before Attach
+	// so the interaction handler picks them up immediately.
+	(&actions.Components{Worker: jobs, DB: database}).Register(router)
 
 	if err := router.Attach(session, cfg.GuildID); err != nil {
 		slog.Error("attach failed", "err", err)

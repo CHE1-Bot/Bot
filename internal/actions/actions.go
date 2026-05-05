@@ -51,6 +51,11 @@ const (
 	// Singular aliases used by some Dashboard code paths.
 	KindGiveawayEnd    = "giveaway.end"
 	KindGiveawayReroll = "giveaway.reroll"
+
+	// Bot → Worker: a user pressed the Enter button on a giveaway panel.
+	// Worker stores the entrant and emits task.completed so the Dashboard
+	// sees live counts.
+	KindGiveawaysEnter = "giveaways.enter"
 )
 
 type Handlers struct {
