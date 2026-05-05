@@ -50,16 +50,27 @@ CREATE TABLE IF NOT EXISTS application_forms (
 );
 
 CREATE TABLE IF NOT EXISTS giveaways (
-    id           BIGSERIAL PRIMARY KEY,
-    guild_id     TEXT NOT NULL,
-    channel_id   TEXT NOT NULL,
-    message_id   TEXT NOT NULL,
-    prize        TEXT NOT NULL,
-    winners      TEXT[],
-    ends_at      TIMESTAMPTZ NOT NULL,
-    status       TEXT NOT NULL,                    -- running | ended
-    lock_channel BOOLEAN NOT NULL DEFAULT FALSE    -- channel locked while running?
+    id               BIGSERIAL PRIMARY KEY,
+    guild_id         TEXT NOT NULL,
+    channel_id       TEXT NOT NULL,
+    message_id       TEXT NOT NULL,
+    prize            TEXT NOT NULL,
+    winners          TEXT[],
+    ends_at          TIMESTAMPTZ NOT NULL,
+    status           TEXT NOT NULL,                    -- running | ended
+    lock_channel     BOOLEAN NOT NULL DEFAULT FALSE,   -- channel locked while running?
+    frequency        TEXT NOT NULL DEFAULT 'daily',    -- daily | weekly | monthly
+    recurring        BOOLEAN NOT NULL DEFAULT FALSE,   -- auto-restart on end?
+    required_role_id TEXT,                             -- optional role gate to enter
+    next_run_at      TIMESTAMPTZ                       -- when the next recurring run is scheduled
 );
+
+-- Best-effort migrations for existing deployments. ALTER ... IF NOT EXISTS
+-- requires Postgres 9.6+, which is well below current minimums.
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS frequency        TEXT NOT NULL DEFAULT 'daily';
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS recurring        BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS required_role_id TEXT;
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS next_run_at      TIMESTAMPTZ;
 
 -- Per-user entries for button-based giveaways. Bot is the writer; the
 -- Worker reads this table when drawing winners.

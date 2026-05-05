@@ -127,6 +127,13 @@ type giveawayPanelInput struct {
 	HostedBy    string `json:"hosted_by"` // user ID; rendered as mention
 	LockChannel bool   `json:"lock_channel"`
 
+	// Tier — set by the Dashboard. "daily" (free) is the default and is
+	// allowed on every server; "weekly" and "monthly" are gated on premium
+	// by the Dashboard before reaching the Worker.
+	Frequency      string `json:"frequency"`        // daily | weekly | monthly
+	Recurring      bool   `json:"recurring"`        // auto-restart on end
+	RequiredRoleID string `json:"required_role_id"` // optional role gate to Enter
+
 	// Embed customization.
 	Title        string `json:"title"`
 	Description  string `json:"description"`
@@ -143,6 +150,19 @@ type giveawayPanelInput struct {
 	ButtonLabel string `json:"button_label"`
 	ButtonEmoji string `json:"button_emoji"`
 	ButtonStyle string `json:"button_style"` // primary|success|secondary|danger
+}
+
+// frequencyLabel maps the wire string to a human label. Empty/unknown values
+// degrade gracefully to "Daily" since that's the free default.
+func frequencyLabel(f string) string {
+	switch f {
+	case "weekly":
+		return "Weekly"
+	case "monthly":
+		return "Monthly"
+	default:
+		return "Daily"
+	}
 }
 
 func (h *Handlers) sendGiveawayPanel(_ context.Context, t worker.Task) (map[string]any, error) {
@@ -224,8 +244,28 @@ func buildGiveawayEmbed(p giveawayPanelInput, ended bool) *discordgo.MessageEmbe
 	if p.HostedBy != "" {
 		desc += "\n**Hosted by:** <@" + p.HostedBy + ">"
 	}
-	if p.Requirements != "" {
-		desc += "\n\n**Requirements**\n" + p.Requirements
+
+	// Frequency badge — only render for non-default tiers, or when recurring,
+	// to keep the daily one-shot embeds visually unchanged.
+	if p.Frequency != "" && p.Frequency != "daily" {
+		desc += "\n**Frequency:** " + frequencyLabel(p.Frequency)
+		if p.Recurring {
+			desc += " · 🔁 recurring"
+		}
+	} else if p.Recurring {
+		desc += "\n🔁 **Recurring** — a new giveaway starts when this one ends."
+	}
+
+	// Combine the freeform Requirements paragraph with the structured role
+	// gate so operators can use either or both.
+	if p.Requirements != "" || p.RequiredRoleID != "" {
+		desc += "\n\n**Requirements**"
+		if p.RequiredRoleID != "" {
+			desc += "\n• Must have <@&" + p.RequiredRoleID + ">"
+		}
+		if p.Requirements != "" {
+			desc += "\n" + p.Requirements
+		}
 	}
 
 	color := p.Color

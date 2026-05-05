@@ -68,6 +68,17 @@ func (m *Module) Commands() []handler.SlashCommand {
 						Description: "What's being given away", Required: true, MaxLength: 256},
 					{Type: discordgo.ApplicationCommandOptionBoolean, Name: "lock_channel",
 						Description: "Lock the channel for the duration of the giveaway", Required: false},
+					{Type: discordgo.ApplicationCommandOptionString, Name: "frequency",
+						Description: "Tier (daily=free, weekly/monthly need premium)", Required: false,
+						Choices: []*discordgo.ApplicationCommandOptionChoice{
+							{Name: "Daily", Value: "daily"},
+							{Name: "Weekly (premium)", Value: "weekly"},
+							{Name: "Monthly (premium)", Value: "monthly"},
+						}},
+					{Type: discordgo.ApplicationCommandOptionBoolean, Name: "recurring",
+						Description: "Auto-restart a fresh giveaway when this one ends", Required: false},
+					{Type: discordgo.ApplicationCommandOptionRole, Name: "required_role",
+						Description: "Only members with this role can enter", Required: false},
 				},
 			},
 			Handler: m.handleGStart,
@@ -147,6 +158,18 @@ func (m *Module) handleGStart(s *discordgo.Session, i *discordgo.InteractionCrea
 	if lc, ok := opts["lock_channel"]; ok {
 		lockChannel = lc.BoolValue()
 	}
+	frequency := "daily"
+	if f, ok := opts["frequency"]; ok && f.StringValue() != "" {
+		frequency = f.StringValue()
+	}
+	recurring := false
+	if rec, ok := opts["recurring"]; ok {
+		recurring = rec.BoolValue()
+	}
+	requiredRole := ""
+	if rr, ok := opts["required_role"]; ok && rr.RoleValue(s, i.GuildID) != nil {
+		requiredRole = rr.RoleValue(s, i.GuildID).ID
+	}
 
 	endsAt := time.Now().Add(dur).Unix()
 	host := interactionUserID(i)
@@ -155,13 +178,16 @@ func (m *Module) handleGStart(s *discordgo.Session, i *discordgo.InteractionCrea
 	defer cancel()
 
 	taskID, err := m.Worker.Enqueue(ctx, kindCreate, map[string]any{
-		"guild_id":     i.GuildID,
-		"channel_id":   i.ChannelID,
-		"prize":        prize,
-		"winner_count": winners,
-		"ends_at_unix": endsAt,
-		"hosted_by":    host,
-		"lock_channel": lockChannel,
+		"guild_id":         i.GuildID,
+		"channel_id":       i.ChannelID,
+		"prize":            prize,
+		"winner_count":     winners,
+		"ends_at_unix":     endsAt,
+		"hosted_by":        host,
+		"lock_channel":     lockChannel,
+		"frequency":        frequency,
+		"recurring":        recurring,
+		"required_role_id": requiredRole,
 	})
 	if err != nil {
 		handler.Reply(s, i, "Couldn't create giveaway: "+err.Error())

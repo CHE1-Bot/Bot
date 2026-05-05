@@ -29,6 +29,11 @@ type giveaway struct {
 	EndsAtUnix  int64    `json:"ends_at_unix"`
 	LockChannel bool     `json:"lock_channel"`
 
+	// Tier (mirrored from send_giveaway_panel so end/reroll preserves it).
+	Frequency      string `json:"frequency"`
+	Recurring      bool   `json:"recurring"`
+	RequiredRoleID string `json:"required_role_id"`
+
 	// Embed customization (mirrored from send_giveaway_panel so we can
 	// rebuild the panel in its Ended state).
 	Title        string `json:"title"`
@@ -269,27 +274,30 @@ func (h *Handlers) markPanelEnded(g giveaway) {
 // record so we can rebuild the panel for Ended/Cancelled states.
 func panelInputFromGiveaway(g giveaway) giveawayPanelInput {
 	return giveawayPanelInput{
-		GuildID:      g.GuildID,
-		ChannelID:    g.ChannelID,
-		GiveawayID:   g.ID,
-		Prize:        g.Prize,
-		WinnerCount:  g.WinnerCount,
-		EndsAtUnix:   g.EndsAtUnix,
-		HostedBy:     g.HostedBy,
-		LockChannel:  g.LockChannel,
-		Title:        g.Title,
-		Description:  g.Description,
-		Color:        g.Color,
-		ImageURL:     g.ImageURL,
-		ThumbnailURL: g.ThumbnailURL,
-		FooterText:   g.FooterText,
-		FooterIcon:   g.FooterIcon,
-		AuthorName:   g.AuthorName,
-		AuthorIcon:   g.AuthorIcon,
-		Requirements: g.Requirements,
-		ButtonLabel:  g.ButtonLabel,
-		ButtonEmoji:  g.ButtonEmoji,
-		ButtonStyle:  g.ButtonStyle,
+		GuildID:        g.GuildID,
+		ChannelID:      g.ChannelID,
+		GiveawayID:     g.ID,
+		Prize:          g.Prize,
+		WinnerCount:    g.WinnerCount,
+		EndsAtUnix:     g.EndsAtUnix,
+		HostedBy:       g.HostedBy,
+		LockChannel:    g.LockChannel,
+		Frequency:      g.Frequency,
+		Recurring:      g.Recurring,
+		RequiredRoleID: g.RequiredRoleID,
+		Title:          g.Title,
+		Description:    g.Description,
+		Color:          g.Color,
+		ImageURL:       g.ImageURL,
+		ThumbnailURL:   g.ThumbnailURL,
+		FooterText:     g.FooterText,
+		FooterIcon:     g.FooterIcon,
+		AuthorName:     g.AuthorName,
+		AuthorIcon:     g.AuthorIcon,
+		Requirements:   g.Requirements,
+		ButtonLabel:    g.ButtonLabel,
+		ButtonEmoji:    g.ButtonEmoji,
+		ButtonStyle:    g.ButtonStyle,
 	}
 }
 
