@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -77,6 +78,57 @@ func (h *Handlers) giveawaysEnd(_ context.Context, t worker.Task) (map[string]an
 		return nil, err
 	}
 	return map[string]any{"winners": winners}, nil
+}
+
+// giveawaysDelete cancels a running giveaway without picking winners:
+// rewrites the panel to a Cancelled state, releases the channel lock if
+// one is held, and drops any persisted entries so a /gdelete + new
+// giveaway combo can't be polluted by stale entrants.
+func (h *Handlers) giveawaysDelete(_ context.Context, t worker.Task) (map[string]any, error) {
+	var g giveaway
+	if err := decode(t.Input, &g); err != nil {
+		return nil, err
+	}
+
+	// Reverse channel lock if it was applied at create time.
+	if g.LockChannel && g.GuildID != "" && g.ChannelID != "" {
+		if err := unlockChannel(h.Session, g.GuildID, g.ChannelID); err != nil {
+			slog.Warn("giveaway channel unlock failed", "channel_id", g.ChannelID, "err", err)
+		}
+	}
+
+	// Rewrite the panel to a Cancelled state with the button disabled.
+	if g.ChannelID != "" && g.MessageID != "" {
+		p := panelInputFromGiveaway(g)
+		cancelled := buildGiveawayEmbed(p, true)
+		cancelled.Title = "🚫 Giveaway cancelled"
+		cancelled.Color = 0x747F8D
+		disabled := buildEnterButton(p, true)
+		disabled.Label = "Giveaway cancelled"
+		components := []discordgo.MessageComponent{
+			discordgo.ActionsRow{Components: []discordgo.MessageComponent{disabled}},
+		}
+		if _, err := h.Session.ChannelMessageEditComplex(&discordgo.MessageEdit{
+			Channel:    g.ChannelID,
+			ID:         g.MessageID,
+			Embeds:     &[]*discordgo.MessageEmbed{cancelled},
+			Components: &components,
+		}); err != nil {
+			slog.Warn("giveaway cancel: edit panel", "id", g.ID, "err", err)
+		}
+	}
+
+	// Clear local entries so a later giveaway with the same ID (shouldn't
+	// happen, but cheap insurance) can't inherit stale rows.
+	if h.DB != nil && g.ID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := h.DB.Exec(ctx,
+			`DELETE FROM giveaway_entries WHERE giveaway_id=$1`, g.ID); err != nil {
+			slog.Warn("giveaway cancel: drop entries", "id", g.ID, "err", err)
+		}
+	}
+	return map[string]any{"cancelled": true}, nil
 }
 
 func (h *Handlers) giveawaysReroll(_ context.Context, t worker.Task) (map[string]any, error) {
@@ -183,27 +235,7 @@ func (h *Handlers) markPanelEnded(g giveaway) {
 	if g.ChannelID == "" || g.MessageID == "" {
 		return
 	}
-	p := giveawayPanelInput{
-		ChannelID:    g.ChannelID,
-		GiveawayID:   g.ID,
-		Prize:        g.Prize,
-		WinnerCount:  g.WinnerCount,
-		EndsAtUnix:   g.EndsAtUnix,
-		HostedBy:     g.HostedBy,
-		Title:        g.Title,
-		Description:  g.Description,
-		Color:        g.Color,
-		ImageURL:     g.ImageURL,
-		ThumbnailURL: g.ThumbnailURL,
-		FooterText:   g.FooterText,
-		FooterIcon:   g.FooterIcon,
-		AuthorName:   g.AuthorName,
-		AuthorIcon:   g.AuthorIcon,
-		Requirements: g.Requirements,
-		ButtonLabel:  g.ButtonLabel,
-		ButtonEmoji:  g.ButtonEmoji,
-		ButtonStyle:  g.ButtonStyle,
-	}
+	p := panelInputFromGiveaway(g)
 	endedEmbed := buildGiveawayEmbed(p, true)
 	disabled := buildEnterButton(p, true)
 	disabled.Label = "Giveaway ended"
@@ -219,6 +251,45 @@ func (h *Handlers) markPanelEnded(g giveaway) {
 	})
 	if err != nil {
 		slog.Warn("giveaway end: edit panel", "id", g.ID, "err", err)
+	}
+
+	// Drop persisted entries — the giveaway is over, no more reads needed
+	// and the table shouldn't grow unbounded.
+	if h.DB != nil && g.ID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := h.DB.Exec(ctx,
+			`DELETE FROM giveaway_entries WHERE giveaway_id=$1`, g.ID); err != nil {
+			slog.Warn("giveaway end: drop entries", "id", g.ID, "err", err)
+		}
+	}
+}
+
+// panelInputFromGiveaway lifts the embed/button knobs out of a giveaway
+// record so we can rebuild the panel for Ended/Cancelled states.
+func panelInputFromGiveaway(g giveaway) giveawayPanelInput {
+	return giveawayPanelInput{
+		GuildID:      g.GuildID,
+		ChannelID:    g.ChannelID,
+		GiveawayID:   g.ID,
+		Prize:        g.Prize,
+		WinnerCount:  g.WinnerCount,
+		EndsAtUnix:   g.EndsAtUnix,
+		HostedBy:     g.HostedBy,
+		LockChannel:  g.LockChannel,
+		Title:        g.Title,
+		Description:  g.Description,
+		Color:        g.Color,
+		ImageURL:     g.ImageURL,
+		ThumbnailURL: g.ThumbnailURL,
+		FooterText:   g.FooterText,
+		FooterIcon:   g.FooterIcon,
+		AuthorName:   g.AuthorName,
+		AuthorIcon:   g.AuthorIcon,
+		Requirements: g.Requirements,
+		ButtonLabel:  g.ButtonLabel,
+		ButtonEmoji:  g.ButtonEmoji,
+		ButtonStyle:  g.ButtonStyle,
 	}
 }
 

@@ -153,6 +153,12 @@ func (h *Handlers) sendGiveawayPanel(_ context.Context, t worker.Task) (map[stri
 	if p.ChannelID == "" || p.GiveawayID == "" || p.Prize == "" {
 		return nil, fmt.Errorf("send_giveaway_panel: channel_id, giveaway_id, prize required")
 	}
+	// Idempotency: drop duplicate WS deliveries within the TTL window so
+	// a worker retry doesn't double-post the panel.
+	if !h.claimPanelRender(p.GiveawayID) {
+		slog.Info("send_giveaway_panel: duplicate delivery, skipped", "giveaway_id", p.GiveawayID)
+		return map[string]any{"duplicate": true}, nil
+	}
 
 	embed := buildGiveawayEmbed(p, false)
 	components := []discordgo.MessageComponent{
@@ -171,13 +177,22 @@ func (h *Handlers) sendGiveawayPanel(_ context.Context, t worker.Task) (map[stri
 
 	// If the operator asked for it, lock the channel for non-staff. The
 	// matching unlock happens when giveaways.end fires (see giveaways.go).
+	// A lock failure is reported back to the Worker (and thus the
+	// Dashboard) so staff can fix the missing Manage Channels perm and
+	// re-run — the giveaway itself is still up.
+	lockResult := map[string]any{"message_id": msg.ID, "channel_locked": false}
 	if p.LockChannel && p.GuildID != "" {
 		if err := lockChannel(h.Session, p.GuildID, p.ChannelID); err != nil {
 			slog.Warn("giveaway channel lock failed", "channel_id", p.ChannelID, "err", err)
+			lockResult["lock_error"] = "couldn't lock channel — does the bot have Manage Channels here? (" + err.Error() + ")"
+			_, _ = h.Session.ChannelMessageSend(p.ChannelID,
+				"⚠️ Couldn't lock the channel for this giveaway — the bot needs **Manage Channels** here. The giveaway is still running.")
+		} else {
+			lockResult["channel_locked"] = true
 		}
 	}
 
-	return map[string]any{"message_id": msg.ID, "channel_locked": p.LockChannel}, nil
+	return lockResult, nil
 }
 
 func buildGiveawayEmbed(p giveawayPanelInput, ended bool) *discordgo.MessageEmbed {

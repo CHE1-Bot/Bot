@@ -14,11 +14,16 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/che1/bot/internal/db"
 	"github.com/che1/bot/internal/worker"
 )
+
+const panelDedupTTL = 10 * time.Minute
 
 // Task kinds the bot performs on the Dashboard's behalf. Strings are
 // canonical names from the Worker repo's catalog. Some Dashboard code
@@ -48,6 +53,7 @@ const (
 
 	KindGiveawaysEnd    = "giveaways.end"
 	KindGiveawaysReroll = "giveaways.reroll"
+	KindGiveawaysDelete = "giveaways.delete"
 	// Singular aliases used by some Dashboard code paths.
 	KindGiveawayEnd    = "giveaway.end"
 	KindGiveawayReroll = "giveaway.reroll"
@@ -60,6 +66,14 @@ const (
 
 type Handlers struct {
 	Session *discordgo.Session
+	// DB is optional; used by giveaway handlers to clear entries on
+	// cancel/end. Other handlers tolerate nil.
+	DB *db.DB
+
+	// panelDedup tracks recently-rendered giveaway IDs so a duplicate WS
+	// delivery (worker retry, brief disconnect, etc.) doesn't post the
+	// panel twice. Entries expire after panelDedupTTL.
+	panelDedup sync.Map // giveawayID -> time.Time
 }
 
 // Register wires every supported task kind into the Subscriber, and logs
@@ -96,6 +110,7 @@ func (h *Handlers) Register(sub *worker.Subscriber) {
 	sub.OnTask(KindGiveawayEnd, h.giveawaysEnd)
 	sub.OnTask(KindGiveawaysReroll, h.giveawaysReroll)
 	sub.OnTask(KindGiveawayReroll, h.giveawaysReroll)
+	sub.OnTask(KindGiveawaysDelete, h.giveawaysDelete)
 
 	sub.OnEvent(worker.EventTaskCompleted, func(_ context.Context, e worker.Event) {
 		slog.Debug("dashboard event", "type", e.Type, "subject", e.Subject)
@@ -108,4 +123,29 @@ func decode(in map[string]any, out any) error {
 		return err
 	}
 	return json.Unmarshal(raw, out)
+}
+
+// claimPanelRender returns true if the caller is the first to render this
+// giveaway ID within panelDedupTTL — false means a duplicate delivery and
+// the caller should skip the side-effect.
+func (h *Handlers) claimPanelRender(giveawayID string) bool {
+	if giveawayID == "" {
+		return true // can't dedup without an ID; let it through
+	}
+	now := time.Now()
+	if prev, loaded := h.panelDedup.Load(giveawayID); loaded {
+		if t, ok := prev.(time.Time); ok && now.Sub(t) < panelDedupTTL {
+			return false
+		}
+	}
+	h.panelDedup.Store(giveawayID, now)
+	// Opportunistic sweep so the map doesn't grow unbounded on long-lived
+	// bots. Cheap O(N) scan, only runs on collisions.
+	h.panelDedup.Range(func(k, v any) bool {
+		if t, ok := v.(time.Time); ok && now.Sub(t) > panelDedupTTL {
+			h.panelDedup.Delete(k)
+		}
+		return true
+	})
+	return true
 }

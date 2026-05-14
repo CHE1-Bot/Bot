@@ -150,7 +150,7 @@ func main() {
 		}
 		if wsURL != "" {
 			sub := worker.NewSubscriber(wsURL, jobs)
-			(&actions.Handlers{Session: session}).Register(sub)
+			(&actions.Handlers{Session: session, DB: database}).Register(sub)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()

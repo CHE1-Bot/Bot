@@ -43,6 +43,11 @@ func (m *Module) Name() string                                                 {
 func (m *Module) MessageCreate(*discordgo.Session, *discordgo.MessageCreate) {}
 
 func (m *Module) Commands() []handler.SlashCommand {
+	// All giveaway-admin commands gated behind Manage Server. Server
+	// admins can re-grant via Discord's Integrations UI on a per-role
+	// basis if they want to delegate.
+	adminPerms := int64(discordgo.PermissionManageServer)
+
 	messageIDOpt := &discordgo.ApplicationCommandOption{
 		Type: discordgo.ApplicationCommandOptionString, Name: "message_id",
 		Description: "Giveaway message ID", Required: true,
@@ -51,15 +56,16 @@ func (m *Module) Commands() []handler.SlashCommand {
 	return []handler.SlashCommand{
 		{
 			Definition: &discordgo.ApplicationCommand{
-				Name:        "gstart",
-				Description: "Start a giveaway in this channel",
+				Name:                     "gstart",
+				Description:              "Start a giveaway in this channel",
+				DefaultMemberPermissions: &adminPerms,
 				Options: []*discordgo.ApplicationCommandOption{
 					{Type: discordgo.ApplicationCommandOptionString, Name: "duration",
 						Description: "Duration, e.g. 30s, 10m, 2h, 1d, 1w", Required: true},
 					{Type: discordgo.ApplicationCommandOptionInteger, Name: "winners",
-						Description: "Number of winners", Required: true, MinValue: ptrFloat(1)},
+						Description: "Number of winners", Required: true, MinValue: ptrFloat(1), MaxValue: 100},
 					{Type: discordgo.ApplicationCommandOptionString, Name: "prize",
-						Description: "What's being given away", Required: true},
+						Description: "What's being given away", Required: true, MaxLength: 256},
 					{Type: discordgo.ApplicationCommandOptionBoolean, Name: "lock_channel",
 						Description: "Lock the channel for the duration of the giveaway", Required: false},
 				},
@@ -68,44 +74,49 @@ func (m *Module) Commands() []handler.SlashCommand {
 		},
 		{
 			Definition: &discordgo.ApplicationCommand{
-				Name:        "gcreate",
-				Description: "Start a giveaway in this channel with a customizable embed (opens a modal)",
+				Name:                     "gcreate",
+				Description:              "Start a giveaway in this channel with a customizable embed (opens a modal)",
+				DefaultMemberPermissions: &adminPerms,
 			},
 			Handler: m.handleGCreate,
 			NoAck:   true, // modal response must be the very first ack
 		},
 		{
 			Definition: &discordgo.ApplicationCommand{
-				Name:        "gend",
-				Description: "End a giveaway early and pick winners",
-				Options:     []*discordgo.ApplicationCommandOption{messageIDOpt},
+				Name:                     "gend",
+				Description:              "End a giveaway early and pick winners",
+				DefaultMemberPermissions: &adminPerms,
+				Options:                  []*discordgo.ApplicationCommandOption{messageIDOpt},
 			},
 			Handler: m.handleGEnd,
 		},
 		{
 			Definition: &discordgo.ApplicationCommand{
-				Name:        "greroll",
-				Description: "Reroll the winners of a finished giveaway",
+				Name:                     "greroll",
+				Description:              "Reroll the winners of a finished giveaway",
+				DefaultMemberPermissions: &adminPerms,
 				Options: []*discordgo.ApplicationCommandOption{
 					messageIDOpt,
 					{Type: discordgo.ApplicationCommandOptionInteger, Name: "winners",
-						Description: "How many new winners to draw", Required: false, MinValue: ptrFloat(1)},
+						Description: "How many new winners to draw", Required: false, MinValue: ptrFloat(1), MaxValue: 100},
 				},
 			},
 			Handler: m.handleGReroll,
 		},
 		{
 			Definition: &discordgo.ApplicationCommand{
-				Name:        "glist",
-				Description: "List currently running giveaways in this server",
+				Name:                     "glist",
+				Description:              "List currently running giveaways in this server",
+				DefaultMemberPermissions: &adminPerms,
 			},
 			Handler: m.handleGList,
 		},
 		{
 			Definition: &discordgo.ApplicationCommand{
-				Name:        "gdelete",
-				Description: "Cancel a giveaway without drawing winners",
-				Options:     []*discordgo.ApplicationCommandOption{messageIDOpt},
+				Name:                     "gdelete",
+				Description:              "Cancel a giveaway without drawing winners",
+				DefaultMemberPermissions: &adminPerms,
+				Options:                  []*discordgo.ApplicationCommandOption{messageIDOpt},
 			},
 			Handler: m.handleGDelete,
 		},
@@ -412,8 +423,18 @@ func interactionUserID(i *discordgo.InteractionCreate) string {
 	return ""
 }
 
+// Duration bounds for slash-command-initiated giveaways. The lower bound
+// keeps the channel-lock UX sensible; the upper bound matches
+// GiveawayBot's 4-week cap and prevents abandoned giveaways from holding
+// channel locks indefinitely.
+const (
+	minDuration = 10 * time.Second
+	maxDuration = 4 * 7 * 24 * time.Hour // 4 weeks
+)
+
 // parseDuration accepts GiveawayBot-style duration strings: "30s", "10m",
 // "2h", "1d", "2w", or compounds like "1d12h". Empty/zero yields error.
+// Enforces minDuration/maxDuration bounds.
 func parseDuration(s string) (time.Duration, error) {
 	s = strings.TrimSpace(strings.ToLower(s))
 	if s == "" {
@@ -456,6 +477,12 @@ func parseDuration(s string) (time.Duration, error) {
 	}
 	if total <= 0 {
 		return 0, fmt.Errorf("duration must be positive")
+	}
+	if total < minDuration {
+		return 0, fmt.Errorf("duration must be at least %s", minDuration)
+	}
+	if total > maxDuration {
+		return 0, fmt.Errorf("duration must be at most %s (4 weeks)", maxDuration)
 	}
 	return total, nil
 }
